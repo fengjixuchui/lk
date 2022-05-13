@@ -109,6 +109,8 @@
 #ifndef ASSEMBLY
 #define __ASM_STR(x)    #x
 
+__BEGIN_CDECLS
+
 #define riscv_csr_clear(csr, bits) \
 ({ \
     ulong __val = bits; \
@@ -214,6 +216,9 @@ enum handler_return riscv_software_exception(void);
 enum handler_return riscv_platform_irq(void);
 void riscv_syscall_handler(struct riscv_short_iframe *frame);
 
+// initialize the fpu state to zero
+void riscv_fpu_zero(void);
+
 // If using S mode, time seems to be implemented in clint.h
 // TODO: clean up by moving into its own header
 #if RISCV_S_MODE
@@ -234,5 +239,7 @@ static inline uint64_t riscv_get_time(void) {
 }
 # endif
 #endif
+
+__END_CDECLS
 
 #endif /* ASSEMBLY */

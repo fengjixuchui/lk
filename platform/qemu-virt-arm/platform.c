@@ -101,20 +101,14 @@ static void cpucallback(uint64_t id, void *cookie) {
 }
 
 struct pcie_detect_state {
-    uint64_t ecam_base;
-    uint64_t ecam_len;
-    uint8_t bus_start;
-    uint8_t bus_end;
+    struct fdt_walk_pcie_info info;
 } pcie_state;
 
-static void pciecallback(uint64_t ecam_base, size_t len, uint8_t bus_start, uint8_t bus_end, void *cookie) {
+static void pciecallback(const struct fdt_walk_pcie_info *info, void *cookie) {
     struct pcie_detect_state *state = cookie;
 
-    LTRACEF("ecam base %#llx, len %zu, bus_start %hhu, bus_end %hhu\n", ecam_base, len, bus_start, bus_end);
-    state->ecam_base = ecam_base;
-    state->ecam_len = len;
-    state->bus_start = bus_start;
-    state->bus_end = bus_end;
+    LTRACEF("ecam base %#llx, len %#llx, bus_start %hhu, bus_end %hhu\n", info->ecam_base, info->ecam_len, info->bus_start, info->bus_end);
+    state->info = *info;
 }
 
 void platform_early_init(void) {
@@ -177,25 +171,48 @@ void platform_early_init(void) {
 }
 
 void platform_init(void) {
+    status_t err;
+
     uart_init();
 
     /* detect pci */
 #if ARCH_ARM
-    if (pcie_state.ecam_base > (1ULL << 32)) {
+    if (pcie_state.info.ecam_base > (1ULL << 32)) {
         // dont try to configure this since we dont have LPAE support
         printf("PCIE: skipping pci initialization due to high memory ECAM\n");
-        pcie_state.ecam_len = 0;
+        pcie_state.info.ecam_len = 0;
     }
 #endif
-    if (pcie_state.ecam_len > 0) {
-        printf("PCIE: initializing pcie with ecam at %#" PRIx64 " found in FDT\n", pcie_state.ecam_base);
-        pci_init_ecam(pcie_state.ecam_base, pcie_state.ecam_len, pcie_state.bus_start, pcie_state.bus_end);
+    if (pcie_state.info.ecam_len > 0) {
+        printf("PCIE: initializing pcie with ecam at %#" PRIx64 " found in FDT\n", pcie_state.info.ecam_base);
+        err = pci_init_ecam(pcie_state.info.ecam_base, pcie_state.info.ecam_len, pcie_state.info.bus_start, pcie_state.info.bus_end);
+        if (err == NO_ERROR) {
+            // add some additional resources to the pci bus manager in case it needs to configure
+            if (pcie_state.info.io_len > 0) {
+                // we can only deal with a mapping of io base 0 to the mmio base
+                DEBUG_ASSERT(pcie_state.info.io_base == 0);
+                pci_bus_mgr_add_resource(PCI_RESOURCE_IO_RANGE, pcie_state.info.io_base, pcie_state.info.io_len);
+
+                // TODO: set the mmio base somehow so pci knows what to do with it
+            }
+            if (pcie_state.info.mmio_len > 0) {
+                pci_bus_mgr_add_resource(PCI_RESOURCE_MMIO_RANGE, pcie_state.info.mmio_base, pcie_state.info.mmio_len);
+            }
+            if (pcie_state.info.mmio64_len > 0) {
+                pci_bus_mgr_add_resource(PCI_RESOURCE_MMIO64_RANGE, pcie_state.info.mmio64_base, pcie_state.info.mmio64_len);
+            }
+
+            // start the bus manager
+            pci_bus_mgr_init();
+
+            pci_bus_mgr_assign_resources();
+        }
     }
 
     /* detect any virtio devices */
     uint virtio_irqs[NUM_VIRTIO_TRANSPORTS];
     for (int i = 0; i < NUM_VIRTIO_TRANSPORTS; i++) {
-        virtio_irqs[i] = VIRTIO0_INT + i;
+        virtio_irqs[i] = VIRTIO0_INT_BASE + i;
     }
 
     virtio_mmio_detect((void *)VIRTIO_BASE, NUM_VIRTIO_TRANSPORTS, virtio_irqs, 0x200);
@@ -209,26 +226,78 @@ void platform_init(void) {
         TRACEF("found virtio networking interface\n");
 
         /* start minip */
-        minip_set_macaddr(mac_addr);
+        minip_set_eth(virtio_net_send_minip_pkt, NULL, mac_addr);
 
         __UNUSED uint32_t ip_addr = IPV4(192, 168, 0, 99);
         __UNUSED uint32_t ip_mask = IPV4(255, 255, 255, 0);
         __UNUSED uint32_t ip_gateway = IPV4_NONE;
 
-        //minip_init(virtio_net_send_minip_pkt, NULL, ip_addr, ip_mask, ip_gateway);
-        minip_init_dhcp(virtio_net_send_minip_pkt, NULL);
-
         virtio_net_start();
+
+        //minip_start_static(ip_addr, ip_mask, ip_gateway);
+        minip_start_dhcp();
     }
 #endif
 }
 
 status_t platform_pci_int_to_vector(unsigned int pci_int, unsigned int *vector) {
-    // at the moment there's no translation between PCI IRQs and native irqs
-    *vector = pci_int;
+    // only 4 legacy vectors supported, within PCIE_INT_BASE and PCIE_INT_BASE + 3
+    if (pci_int >= 4) {
+        return ERR_OUT_OF_RANGE;
+    }
+    *vector = pci_int + PCIE_INT_BASE;
     return NO_ERROR;
 }
 
-status_t platform_allocate_interrupts(size_t count, uint align_log2, unsigned int *vector) {
-    return ERR_NOT_SUPPORTED;
+status_t platform_allocate_interrupts(size_t count, uint align_log2, bool msi, unsigned int *vector) {
+    TRACEF("count %zu align %u msi %d\n", count, align_log2, msi);
+
+    // TODO: handle nonzero alignment, count > 0, and add locking
+
+    // list of allocated msi interrupts
+    static uint64_t msi_bitmap = 0;
+
+    // cannot handle allocating for anything but MSI interrupts
+    if (!msi) {
+        return ERR_NOT_SUPPORTED;
+    }
+
+    // cannot deal with alignment yet
+    DEBUG_ASSERT(align_log2 == 0);
+    DEBUG_ASSERT(count == 1);
+
+    // make a copy of the bitmap
+    int allocated = -1;
+    for (size_t i = 0; i < sizeof(msi_bitmap) * 8; i++) {
+        if ((msi_bitmap & (1UL << i)) == 0) {
+            msi_bitmap |= (1UL << i);
+            allocated = i;
+            break;
+        }
+    }
+    if (allocated < 0) {
+        return ERR_NOT_FOUND;
+    }
+
+    allocated += MSI_INT_BASE;
+
+    TRACEF("allocated msi at %u\n", allocated);
+    *vector = allocated;
+    return NO_ERROR;
+}
+
+status_t platform_compute_msi_values(unsigned int vector, unsigned int cpu, bool edge,
+        uint64_t *msi_address_out, uint16_t *msi_data_out) {
+
+    // only handle edge triggered at the moment
+    DEBUG_ASSERT(edge);
+    // only handle cpu 0
+    DEBUG_ASSERT(cpu == 0);
+
+    // TODO: call through to the appropriate gic driver to deal with GICv2 vs v3
+
+    *msi_data_out = vector;
+    *msi_address_out = 0x08020040; // address of the GICv2 MSI port
+
+    return NO_ERROR;
 }

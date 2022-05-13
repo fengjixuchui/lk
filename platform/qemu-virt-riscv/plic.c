@@ -66,6 +66,10 @@ void register_int_handler(unsigned int vector, int_handler handler, void *arg) {
     handlers[vector].arg = arg;
 }
 
+void register_int_handler_msi(unsigned int vector, int_handler handler, void *arg, bool edge) {
+    PANIC_UNIMPLEMENTED;
+}
+
 enum handler_return riscv_platform_irq(void) {
     // see what irq triggered it
     uint32_t vector = *REG32(PLIC_CLAIM(riscv_current_hart()));
@@ -98,6 +102,11 @@ status_t platform_pci_int_to_vector(unsigned int pci_int, unsigned int *vector) 
     return NO_ERROR;
 }
 
-status_t platform_allocate_interrupts(size_t count, uint align_log2, unsigned int *vector) {
+status_t platform_allocate_interrupts(size_t count, uint align_log2, bool msi, unsigned int *vector) {
+    return ERR_NOT_SUPPORTED;
+}
+
+status_t platform_compute_msi_values(unsigned int vector, unsigned int cpu, bool edge,
+        uint64_t *msi_address_out, uint16_t *msi_data_out) {
     return ERR_NOT_SUPPORTED;
 }

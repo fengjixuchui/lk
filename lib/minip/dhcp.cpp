@@ -253,6 +253,9 @@ void dhcp::udp_callback(void *data, size_t sz, uint32_t srcip, uint16_t srcport)
 #endif
     sz -= sizeof(dhcp_msg_t);
     opt = msg->options;
+#if TRACE_DHCP
+    printf("\toptions: ");
+#endif
     while (sz >= 2) {
         sz -= 2;
         if (opt[1] > sz) {
@@ -319,6 +322,9 @@ done:
             }
             state_ = CONFIGURED;
             configured_ = true;
+
+            // signal that minip is ready to be used
+            minip_set_configured();
         }
     }
 }
@@ -372,9 +378,7 @@ status_t dhcp::start() {
 
 } // anonymous namespace
 
-void minip_init_dhcp(tx_func_t tx_func, void *tx_arg) {
-    minip_init(tx_func, tx_arg, IPV4_NONE, IPV4_NONE, IPV4_NONE);
-
+void minip_start_dhcp() {
     static dhcp d;
     d.start();
 }

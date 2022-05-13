@@ -9,6 +9,7 @@
  */
 
 #include <lk/err.h>
+#include <lk/init.h>
 #include <lk/trace.h>
 #include <arch/x86/mmu.h>
 #include <platform.h>
@@ -283,6 +284,7 @@ void platform_init(void) {
                 // try to initialize pci based on the MCFG ecam aperture
                 status_t err = pci_init_ecam(entry->base_address, entry->segment, entry->start_bus, entry->end_bus);
                 if (err == NO_ERROR) {
+                    pci_bus_mgr_init();
                     pci_initted = true;
                 }
             }
@@ -291,14 +293,24 @@ void platform_init(void) {
 
     // fall back to legacy pci if we couldn't find the pcie aperture
     if (!pci_initted) {
-        pci_init_legacy();
+        status_t err = pci_init_legacy();
+        if (err == NO_ERROR) {
+            pci_bus_mgr_init();
+        }
     }
 #endif
 
     platform_init_mmu_mappings();
+}
 
 #if WITH_LIB_MINIP
-    extern int e1000_tx(pktbuf_t *p);
-    minip_init_dhcp(e1000_tx, 0);
-#endif
+void _start_minip(uint level) {
+    extern status_t e1000_register_with_minip(void);
+    status_t err = e1000_register_with_minip();
+    if (err == NO_ERROR) {
+        minip_start_dhcp();
+    }
 }
+
+LK_INIT_HOOK(start_minip, _start_minip, LK_INIT_LEVEL_APPS - 1);
+#endif

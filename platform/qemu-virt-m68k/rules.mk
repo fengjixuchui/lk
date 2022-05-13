@@ -3,6 +3,7 @@ LOCAL_DIR := $(GET_LOCAL_DIR)
 MODULE := $(LOCAL_DIR)
 
 ARCH := m68k
+M68K_CPU := 68040
 LK_HEAP_IMPLEMENTATION ?= dlmalloc
 
 MODULE_DEPS += lib/cbuf
@@ -23,5 +24,8 @@ GLOBAL_DEFINES += PLATFORM_SUPPORTS_PANIC_SHELL=1
 
 # our timer supports one shot mode
 GLOBAL_DEFINES += PLATFORM_HAS_DYNAMIC_TIMER=1
+
+# we will find the memory size from bootinfo and populate novm
+GLOBAL_DEFINES += NOVM_DEFAULT_ARENA=0
 
 include make/module.mk

@@ -6,6 +6,7 @@
  * https://opensource.org/licenses/MIT
  */
 #include <inttypes.h>
+#include <lk/err.h>
 #include <lk/reg.h>
 #include <lk/trace.h>
 #include <kernel/thread.h>
@@ -79,20 +80,15 @@ static void cpucallback(uint64_t id, void *cookie) {
 }
 
 struct pcie_detect_state {
-    uint64_t ecam_base;
-    uint64_t ecam_len;
-    uint8_t bus_start;
-    uint8_t bus_end;
+    struct fdt_walk_pcie_info info;
 } pcie_state;
 
-static void pciecallback(uint64_t ecam_base, size_t len, uint8_t bus_start, uint8_t bus_end, void *cookie) {
+
+static void pciecallback(const struct fdt_walk_pcie_info *info, void *cookie) {
     struct pcie_detect_state *state = cookie;
 
-    LTRACEF("ecam base %#llx, len %zu, bus_start %hhu, bus_end %hhu\n", ecam_base, len, bus_start, bus_end);
-    state->ecam_base = ecam_base;
-    state->ecam_len = len;
-    state->bus_start = bus_start;
-    state->bus_end = bus_end;
+    LTRACEF("ecam base %#llx, len %#llx, bus_start %hhu, bus_end %hhu\n", info->ecam_base, info->ecam_len, info->bus_start, info->bus_end);
+    state->info = *info;
 }
 
 void platform_early_init(void) {
@@ -159,9 +155,30 @@ void platform_init(void) {
     uart_init();
 
     /* detect pci */
-    if (pcie_state.ecam_len > 0) {
-        printf("PCIE: initializing pcie with ecam at %#" PRIx64 " found in FDT\n", pcie_state.ecam_base);
-        pci_init_ecam(pcie_state.ecam_base, pcie_state.ecam_len, pcie_state.bus_start, pcie_state.bus_end);
+    if (pcie_state.info.ecam_len > 0) {
+        printf("PCIE: initializing pcie with ecam at %#" PRIx64 " found in FDT\n", pcie_state.info.ecam_base);
+        status_t err = pci_init_ecam(pcie_state.info.ecam_base, pcie_state.info.ecam_len, pcie_state.info.bus_start, pcie_state.info.bus_end);
+        if (err == NO_ERROR) {
+            // add some additional resources to the pci bus manager in case it needs to configure
+            if (pcie_state.info.io_len > 0) {
+                // we can only deal with a mapping of io base 0 to the mmio base
+                DEBUG_ASSERT(pcie_state.info.io_base == 0);
+                pci_bus_mgr_add_resource(PCI_RESOURCE_IO_RANGE, pcie_state.info.io_base, pcie_state.info.io_len);
+
+                // TODO: set the mmio base somehow so pci knows what to do with it
+            }
+            if (pcie_state.info.mmio_len > 0) {
+                pci_bus_mgr_add_resource(PCI_RESOURCE_MMIO_RANGE, pcie_state.info.mmio_base, pcie_state.info.mmio_len);
+            }
+            if (pcie_state.info.mmio64_len > 0) {
+                pci_bus_mgr_add_resource(PCI_RESOURCE_MMIO64_RANGE, pcie_state.info.mmio64_base, pcie_state.info.mmio64_len);
+            }
+
+            // start the bus manager
+            pci_bus_mgr_init();
+
+            pci_bus_mgr_assign_resources();            // add some additional resources to the pci bus manager in case it needs to configure
+        };
     }
 
     /* detect any virtio devices */
@@ -181,16 +198,19 @@ void platform_init(void) {
         TRACEF("found virtio networking interface\n");
 
         /* start minip */
-        minip_set_macaddr(mac_addr);
+        minip_set_eth(virtio_net_send_minip_pkt, NULL, mac_addr);
 
+        virtio_net_start();
+
+#if 0
         __UNUSED uint32_t ip_addr = IPV4(192, 168, 0, 99);
         __UNUSED uint32_t ip_mask = IPV4(255, 255, 255, 0);
         __UNUSED uint32_t ip_gateway = IPV4_NONE;
 
-        //minip_init(virtio_net_send_minip_pkt, NULL, ip_addr, ip_mask, ip_gateway);
-        minip_init_dhcp(virtio_net_send_minip_pkt, NULL);
-
-        virtio_net_start();
+        minip_start_static(ip_addr, ip_mask, ip_gateway);
+#else
+        minip_start_dhcp();
+#endif
     }
 #endif
 }

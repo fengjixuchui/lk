@@ -9,6 +9,7 @@
 
 #include "minip-internal.h"
 
+#include <assert.h>
 #include <lk/err.h>
 #include <stdio.h>
 #include <lk/debug.h>
@@ -20,9 +21,9 @@
 #include <lk/trace.h>
 #include <malloc.h>
 #include <lk/list.h>
+#include <lk/init.h>
+#include <kernel/event.h>
 #include <kernel/thread.h>
-
-static struct list_node arp_list = LIST_INITIAL_VALUE(arp_list);
 
 // TODO
 // 1. Tear endian code out into something that flips words before/after tx/rx calls
@@ -38,11 +39,37 @@ static uint8_t minip_mac[6] = {0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC};
 
 static char minip_hostname[32] = "";
 
+static volatile bool minip_configured = false;
+static event_t minip_configured_event = EVENT_INITIAL_VALUE(minip_configured_event, false, 0);
+
+/* This function is called by minip to send packets */
+tx_func_t minip_tx_handler;
+void *minip_tx_arg;
+
 static void dump_mac_address(const uint8_t *mac);
 static void dump_ipv4_addr(uint32_t addr);
 
+/* if all the important configuration bits are set, signal that we're configured */
+static void check_and_set_configured(void) {
+    if (minip_ip == IPV4_NONE) return;
+    if (minip_netmask == IPV4_NONE) return;
+    if (minip_broadcast == IPV4_BCAST) return;
+    // minip_gateway doesn't have to be set
+    if (minip_mac[0] == 0xcc &&
+        minip_mac[1] == 0xcc &&
+        minip_mac[2] == 0xcc &&
+        minip_mac[3] == 0xcc &&
+        minip_mac[4] == 0xcc &&
+        minip_mac[5] == 0xcc) return;
+
+    // we're configured
+    printf("MINIP: setting configured state\n");
+    minip_set_configured();
+}
+
 void minip_set_hostname(const char *name) {
     strlcpy(minip_hostname, name, sizeof(minip_hostname));
+    check_and_set_configured();
 }
 
 const char *minip_get_hostname(void) {
@@ -57,10 +84,6 @@ void minip_get_macaddr(uint8_t *addr) {
     mac_addr_copy(addr, minip_mac);
 }
 
-void minip_set_macaddr(const uint8_t *addr) {
-    mac_addr_copy(minip_mac, addr);
-}
-
 uint32_t minip_get_ipaddr(void) {
     return minip_ip;
 }
@@ -68,6 +91,7 @@ uint32_t minip_get_ipaddr(void) {
 void minip_set_ipaddr(const uint32_t addr) {
     minip_ip = addr;
     compute_broadcast_address();
+    check_and_set_configured();
 }
 
 uint32_t minip_get_broadcast(void) {
@@ -81,14 +105,30 @@ uint32_t minip_get_netmask(void) {
 void minip_set_netmask(const uint32_t netmask) {
     minip_netmask = netmask;
     compute_broadcast_address();
+    check_and_set_configured();
 }
 
 uint32_t minip_get_gateway(void) {
     return minip_gateway;
 }
 
-void minip_set_gateway(const uint32_t gateway) {
-    minip_gateway = gateway;
+void minip_set_gateway(const uint32_t addr) {
+    minip_gateway = addr;
+    // TODO: check that it is reacheable on local network
+    check_and_set_configured();
+}
+
+void minip_set_configured(void) {
+    minip_configured = true;
+    event_signal(&minip_configured_event, true);
+}
+
+bool minip_is_configured(void) {
+    return minip_configured;
+}
+
+status_t minip_wait_for_configured(lk_time_t timeout) {
+    return event_wait_timeout(&minip_configured_event, timeout);
 }
 
 void gen_random_mac_address(uint8_t *mac_addr) {
@@ -100,22 +140,24 @@ void gen_random_mac_address(uint8_t *mac_addr) {
     mac_addr[0] |= (1<<1);
 }
 
-/* This function is called by minip to send packets */
-tx_func_t minip_tx_handler;
-void *minip_tx_arg;
+void minip_start_static(uint32_t ip, uint32_t mask, uint32_t gateway) {
+    minip_set_ipaddr(ip);
+    minip_set_netmask(mask);
+    minip_set_gateway(gateway);
+}
 
-void minip_init(tx_func_t tx_handler, void *tx_arg,
-                uint32_t ip, uint32_t mask, uint32_t gateway) {
+void minip_set_eth(tx_func_t tx_handler, void *tx_arg, const uint8_t *macaddr) {
+    LTRACEF("handler %p, arg %p, macaddr %p\n", tx_handler, tx_arg, macaddr);
+
+    DEBUG_ASSERT(minip_tx_handler == NULL);
+    DEBUG_ASSERT(minip_tx_arg == NULL);
+    // TODO: assert mac address is not already set
+
+    // set up the low level driver handler
     minip_tx_handler = tx_handler;
     minip_tx_arg = tx_arg;
 
-    minip_ip = ip;
-    minip_netmask = mask;
-    minip_gateway = gateway;
-    compute_broadcast_address();
-
-    arp_cache_init();
-    net_timer_init();
+    mac_addr_copy(minip_mac, macaddr);
 }
 
 static uint16_t ipv4_payload_len(struct ipv4_hdr *pkt) {
@@ -167,7 +209,7 @@ static int send_arp_request(uint32_t addr) {
     mac_addr_copy(arp->sha, minip_mac);
     mac_addr_copy(arp->tha, bcast_mac);
 
-    minip_tx_handler(p);
+    minip_tx_handler(minip_tx_arg, p);
     return 0;
 }
 
@@ -209,13 +251,24 @@ status_t minip_ipv4_send(pktbuf_t *p, uint32_t dest_addr, uint8_t proto) {
     struct ipv4_hdr *ip = pktbuf_prepend(p, sizeof(struct ipv4_hdr));
     struct eth_hdr *eth = pktbuf_prepend(p, sizeof(struct eth_hdr));
 
-
+    // are we sending a broadcast packet?
     if (dest_addr == IPV4_BCAST || dest_addr == minip_broadcast) {
         dst_mac = bcast_mac;
         goto ready;
     }
 
-    dst_mac = get_dest_mac(dest_addr);
+    // is this a local subnet packet or do we need to send to the router?
+    uint32_t target_addr = dest_addr;
+    if ((dest_addr & minip_netmask) != (minip_ip & minip_netmask)) {
+        // need to use the gateway
+        if (minip_gateway == IPV4_NONE) {
+            return ERR_NOT_FOUND; // TODO: better error code
+        }
+
+        target_addr = minip_gateway;
+    }
+
+    dst_mac = arp_get_dest_mac(target_addr);
     if (!dst_mac) {
         pktbuf_free(p, true);
         ret = -EHOSTUNREACH;
@@ -230,7 +283,7 @@ ready:
     minip_build_mac_hdr(eth, dst_mac, ETH_TYPE_IPV4);
     minip_build_ipv4_hdr(ip, dest_addr, proto, data_len);
 
-    minip_tx_handler(p);
+    minip_tx_handler(minip_tx_arg, p);
 
 err:
     return ret;
@@ -267,7 +320,7 @@ static void send_ping_reply(uint32_t ipaddr, struct icmp_pkt *req, size_t reqdat
     icmp->chksum = 0;
     icmp->chksum = rfc1701_chksum((uint8_t *) icmp, len);
 
-    minip_tx_handler(p);
+    minip_tx_handler(minip_tx_arg, p);
 }
 
 static void dump_ipv4_addr(uint32_t addr) {
@@ -406,7 +459,7 @@ __NO_INLINE static int handle_arp_pkt(pktbuf_t *p) {
                 mac_addr_copy(rarp->tha, arp->sha);
                 rarp->tpa = arp->spa;
 
-                minip_tx_handler(rp);
+                minip_tx_handler(minip_tx_arg, rp);
             }
         }
         break;
@@ -499,3 +552,12 @@ void printip_named(const char *s, uint32_t x) {
     printf("%s ", s);
     printip(x);
 }
+
+// run static initialization
+static void minip_init(uint level) {
+    arp_cache_init();
+    net_timer_init();
+}
+
+
+LK_INIT_HOOK(minip, minip_init, LK_INIT_LEVEL_THREADING);
