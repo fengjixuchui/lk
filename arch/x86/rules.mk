@@ -101,11 +101,11 @@ ifeq ($(SUBARCH),x86-64)
 ARCH_COMPILEFLAGS += -fno-stack-protector
 ARCH_COMPILEFLAGS += -mcmodel=kernel
 ARCH_COMPILEFLAGS += -mno-red-zone
-
-# disable builtins to keep the compiler from generating sse instructions
-# for load/stores
-ARCH_COMPILEFLAGS += -fno-builtin
 endif # SUBARCH x86-64
+
+# set switches to generate/not generate fpu code
+ARCH_COMPILEFLAGS_FLOAT +=
+ARCH_COMPILEFLAGS_NOFLOAT += -mgeneral-regs-only
 
 # select default optimizations for different target cpu levels
 ifeq ($(CPU),legacy)
@@ -116,9 +116,11 @@ GLOBAL_DEFINES += X86_LEGACY=1
 else ifeq ($(SUBARCH),x86-32)
 ARCH_COMPILEFLAGS += -march=i686
 ARCH_OPTFLAGS := -O2
+GLOBAL_DEFINES += X86_LEGACY=0
 else ifeq ($(SUBARCH),x86-64)
 ARCH_COMPILEFLAGS += -march=x86-64
 ARCH_OPTFLAGS := -O2
+GLOBAL_DEFINES += X86_LEGACY=0
 endif
 
 LIBGCC := $(shell $(TOOLCHAIN_PREFIX)gcc $(GLOBAL_COMPILEFLAGS) $(ARCH_COMPILEFLAGS) -print-libgcc-file-name)

@@ -24,16 +24,14 @@ RISCV_MMU ?= none
 RISCV_FPU ?= false
 SUBARCH ?= 32
 RISCV_MODE ?= machine
+ARCH_RISCV_EMBEDDED ?= false
+ARCH_RISCV_TWOSEGMENT ?= false
 
 GLOBAL_DEFINES += SMP_MAX_CPUS=$(SMP_MAX_CPUS)
 GLOBAL_DEFINES += PLATFORM_HAS_DYNAMIC_TIMER=1
 
 ifeq (true,$(call TOBOOL,$(WITH_SMP)))
 GLOBAL_DEFINES += WITH_SMP=1
-endif
-
-ifeq (true,$(call TOBOOL,$(RISCV_FPU)))
-GLOBAL_DEFINES += RISCV_FPU=1
 endif
 
 ifeq ($(strip $(RISCV_MODE)),machine)
@@ -124,27 +122,58 @@ GLOBAL_DEFINES += MEMSIZE=$(MEMSIZE)
 # if ARCH_riscv{32|64}_TOOLCHAIN_PREFIX is set use it as an override
 # for toolchain prefix.
 ifdef ARCH_$(ARCH)$(SUBARCH)_TOOLCHAIN_PREFIX
-TOOLCHAIN_PREFIX := $(ARCH_$(ARCH)$(SUBARCH)_TOOLCHAIN_PREFIX)
+    TOOLCHAIN_PREFIX := $(ARCH_$(ARCH)$(SUBARCH)_TOOLCHAIN_PREFIX)
 endif
 
 # default toolchain is riscv{32|64}-elf-. assume its in the path.
 ifndef TOOLCHAIN_PREFIX
-TOOLCHAIN_PREFIX := riscv$(SUBARCH)-elf-
+    TOOLCHAIN_PREFIX := riscv$(SUBARCH)-elf-
 endif
+
+ifeq (true,$(call TOBOOL,$(RISCV_FPU)))
+    GLOBAL_DEFINES += RISCV_FPU=1
+endif
+
+# for the moment simply build all sources the same way, with or without float based on
+# the configuration of the platform
+ARCH_COMPILEFLAGS_FLOAT :=
+ARCH_COMPILEFLAGS_NOFLOAT :=
 
 # based on 32 or 64 bitness, select the right toolchain and some
 # compiler codegen flags
 ifeq ($(SUBARCH),32)
-ARCH_COMPILEFLAGS := -march=rv32imac -mabi=ilp32
-# override machine for ld -r
-GLOBAL_MODULE_LDFLAGS += -m elf32lriscv
+    ifeq (true,$(call TOBOOL,$(RISCV_FPU)))
+        ARCH_COMPILEFLAGS := -march=rv32gc -mabi=ilp32d
+    else
+        ARCH_COMPILEFLAGS := -march=rv32imac -mabi=ilp32
+    endif
+
+    # override machine for ld -r
+    GLOBAL_MODULE_LDFLAGS += -m elf32lriscv
 else ifeq ($(SUBARCH),64)
-GLOBAL_DEFINES += IS_64BIT=1
-ARCH_COMPILEFLAGS := -march=rv64imac -mabi=lp64 -mcmodel=medany
-# override machine for ld -r
-GLOBAL_MODULE_LDFLAGS += -m elf64lriscv
+    GLOBAL_DEFINES += IS_64BIT=1
+
+    ifeq (true,$(call TOBOOL,$(RISCV_FPU)))
+        # HACK: use rv64imafdc instead of the equivalent rv64gc due to
+        # older toolchains not supporting the mapping of one to the other
+        # when selecting libgcc.
+        ARCH_COMPILEFLAGS := -march=rv64imafdc -mabi=lp64d -mcmodel=medany
+    else
+        ARCH_COMPILEFLAGS := -march=rv64imac -mabi=lp64 -mcmodel=medany
+    endif
+
+    # override machine for ld -r
+    GLOBAL_MODULE_LDFLAGS += -m elf64lriscv
 else
-$(error SUBARCH not set or set to something unknown)
+    $(error SUBARCH not set or set to something unknown)
+endif
+
+# test to see if -misa-spec=2.2 is a valid switch.
+# misa-spec is added to make sure the compiler picks up the zicsr extension by default.
+MISA_SPEC := $(shell $(TOOLCHAIN_PREFIX)gcc $(ARCH_COMPILEFLAGS) -misa-spec=2.2 -E - < /dev/null > /dev/null 2>1 && echo supported)
+$(info MISA_SPEC = $(MISA_SPEC))
+ifeq ($(MISA_SPEC),supported)
+ARCH_COMPILEFLAGS += -misa-spec=2.2
 endif
 
 # embedded switch sets the default compile optimization and passes
@@ -170,7 +199,7 @@ GENERATED += \
 $(BUILDDIR)/linker-%.ld: $(LOCAL_DIR)/linker-%.ld $(wildcard arch/*.ld) linkerscript.phony
 	@echo generating $@
 	@$(MKDIR)
-	$(NOECHO)sed "s/%BITS%/$(SUBARCH)/g;s/%ROMBASE%/$(ROMBASE)/;s/%MEMBASE%/$(MEMBASE)/;s/%MEMSIZE%/$(MEMSIZE)/;s/%KERNEL_BASE%/$(KERNEL_BASE)/;s/%KERNEL_LOAD_OFFSET%/$(KERNEL_LOAD_OFFSET)/;s/%VECTOR_BASE_PHYS%/$(VECTOR_BASE_PHYS)/" < $< > $@.tmp
+	$(NOECHO)sed "s/%BITS%/$(SUBARCH)/g;s/%ROMBASE%/$(ROMBASE)/;s/%MEMBASE%/$(MEMBASE)/;s/%MEMSIZE%/$(MEMSIZE)/;s/%KERNEL_BASE%/$(KERNEL_BASE)/;s/%KERNEL_LOAD_OFFSET%/$(KERNEL_LOAD_OFFSET)/" < $< > $@.tmp
 	@$(call TESTANDREPLACEFILE,$@.tmp,$@)
 
 linkerscript.phony:
@@ -190,4 +219,8 @@ GLOBAL_DEFINES += ARCH_RISCV_TWOSEGMENT=0
 LINKER_SCRIPT += $(BUILDDIR)/linker-onesegment.ld
 endif
 
+$(info ARCH_COMPILEFLAGS = $(ARCH_COMPILEFLAGS))
+
 include make/module.mk
+
+# vim: set ts=4 sw=4 expandtab:

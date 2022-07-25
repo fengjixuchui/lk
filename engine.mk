@@ -54,7 +54,8 @@ endif # PROJECT == null
 
 DEBUG ?= 2
 
-BUILDDIR := $(BUILDROOT)/build-$(PROJECT)
+BUILDDIR_SUFFIX ?=
+BUILDDIR := $(BUILDROOT)/build-$(PROJECT)$(BUILDDIR_SUFFIX)
 OUTBIN := $(BUILDDIR)/lk.bin
 OUTELF := $(BUILDDIR)/lk.elf
 CONFIGHEADER := $(BUILDDIR)/config.h
@@ -82,16 +83,20 @@ GLOBAL_LDFLAGS += $(addprefix -L,$(LKINC))
 
 # Architecture specific compile flags
 ARCH_COMPILEFLAGS :=
+ARCH_COMPILEFLAGS_NOFLOAT := # flags used when compiling with floating point support
+ARCH_COMPILEFLAGS_FLOAT := # flags for when not compiling with floating point support
 ARCH_CFLAGS :=
 ARCH_CPPFLAGS :=
 ARCH_ASMFLAGS :=
 ARCH_LDFLAGS :=
+ARCH_OBJDUMP_FLAGS :=
+THUMBCFLAGS := # optional compile switches set by arm architecture when compiling in thumb mode
 
 # top level rule
 all:: $(OUTBIN) $(OUTELF).lst $(OUTELF).debug.lst $(OUTELF).sym $(OUTELF).sym.sorted $(OUTELF).size $(OUTELF).dump $(BUILDDIR)/srcfiles.txt $(BUILDDIR)/include_paths.txt
 
 # master module object list
-ALLOBJS_MODULE :=
+ALLMODULE_OBJS :=
 
 # master object list (for dep generation)
 ALLOBJS :=
@@ -199,7 +204,6 @@ GLOBAL_DEFINES += $(EXTERNAL_DEFINES)
 $(info EXTERNAL_DEFINES = $(EXTERNAL_DEFINES))
 endif
 
-
 # prefix all of the paths in GLOBAL_INCLUDES with -I
 GLOBAL_INCLUDES := $(addprefix -I,$(GLOBAL_INCLUDES))
 
@@ -277,7 +281,7 @@ clean: $(EXTRA_CLEANDEPS)
 	rm -f $(ALLOBJS) $(DEPS) $(GENERATED) $(OUTBIN) $(OUTELF) $(OUTELF).lst $(OUTELF).debug.lst $(OUTELF).sym $(OUTELF).sym.sorted $(OUTELF).size $(OUTELF).hex $(OUTELF).dump
 
 install: all
-	scp $(OUTBIN) 192.168.0.4:/tftproot
+	scp $(OUTBIN) 192.168.0.4:/tftpboot
 
 list-arch:
 	@echo ARCH = ${ARCH}

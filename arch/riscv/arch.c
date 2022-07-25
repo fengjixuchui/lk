@@ -55,6 +55,14 @@ void riscv_early_init_percpu(void) {
     riscv_csr_clear(RISCV_CSR_XSTATUS, RISCV_CSR_XSTATUS_IE);
     riscv_csr_clear(RISCV_CSR_XIE, RISCV_CSR_XIE_SIE | RISCV_CSR_XIE_TIE | RISCV_CSR_XIE_EIE);
 
+#if RISCV_FPU
+    // enable the fpu and zero it out
+    riscv_csr_clear(RISCV_CSR_XSTATUS, RISCV_CSR_XSTATUS_FS_MASK);
+    riscv_csr_set(RISCV_CSR_XSTATUS, RISCV_CSR_XSTATUS_FS_INITIAL);
+
+    riscv_fpu_zero();
+#endif
+
     // enable cycle counter (disabled for now, unimplemented on sifive-e)
     //riscv_csr_set(mcounteren, 1);
 }
@@ -88,19 +96,28 @@ void arch_init(void) {
     riscv_init_percpu();
 
     // print some arch info
+    const char *mode_string;
 #if RISCV_M_MODE
-    dprintf(INFO, "RISCV: Machine mode\n");
+    mode_string = "Machine";
+#elif RISCV_S_MODE
+    mode_string = "Supervisor";
+#else
+#error need to define M or S mode
+#endif
+
+    dprintf(INFO, "RISCV: %s mode\n", mode_string);
     dprintf(INFO, "RISCV: mvendorid %#lx marchid %#lx mimpid %#lx mhartid %#x\n",
             riscv_get_mvendorid(), riscv_get_marchid(),
             riscv_get_mimpid(), riscv_current_hart());
+
+#if RISCV_M_MODE
     dprintf(INFO, "RISCV: misa %#lx\n", riscv_csr_read(RISCV_CSR_MISA));
-#else
-    dprintf(INFO, "RISCV: Supervisor mode\n");
+#elif RISCV_S_MODE
+    sbi_init();
 #if RISCV_MMU
     dprintf(INFO, "RISCV: MMU enabled sv%u\n", RISCV_MMU);
     riscv_mmu_init();
 #endif
-    sbi_init();
 #endif
 
 #if WITH_SMP
@@ -136,10 +153,6 @@ void arch_enter_uspace(vaddr_t entry_point, vaddr_t user_stack_top) {
     status = RISCV_CSR_XSTATUS_PIE |
              RISCV_CSR_XSTATUS_SUM;
 
-#if RISCV_FPU
-    status |= (1ul << RISCV_CSR_XSTATUS_FS_SHIFT); // mark fpu state 'initial'
-#endif
-
     printf("user sstatus %#lx\n", status);
 
     arch_disable_ints();
@@ -148,7 +161,10 @@ void arch_enter_uspace(vaddr_t entry_point, vaddr_t user_stack_top) {
     riscv_csr_write(sepc, entry_point);
     riscv_csr_write(sscratch, kernel_stack_top);
 
+#if RISCV_FPU
+    status |= RISCV_CSR_XSTATUS_FS_INITIAL; // mark fpu state 'initial'
     riscv_fpu_zero();
+#endif
 
     // put the current tp (percpu pointer) just below the top of the stack
     // the exception code will recover it when coming from user space
